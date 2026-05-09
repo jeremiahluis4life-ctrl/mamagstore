@@ -1,4 +1,20 @@
 <?php
+
+$isWebhook = isset($_SERVER['HTTP_X_PAYSTACK_SIGNATURE']);
+
+if ($isWebhook) {
+    // Validate Webhook Signature
+    $sig = $_SERVER['HTTP_X_PAYSTACK_SIGNATURE'];
+    if ($sig !== hash_hmac('sha512', $input, $paystack_secret_key)) {
+        exit; // Silent fail for unauthorized webhook attempts
+    }
+
+    if ($raw_data['event'] !== 'charge.success') exit;
+    
+    // Process the order...
+    // This runs on YOUR server, not on the user's browser
+}
+
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
