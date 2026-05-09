@@ -2829,7 +2829,7 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-// LOAD CHECKOUT PANEL 
+// L///////////////////////////////////////////////////OAD CHECKOUT PANEL ////////////////////////////////////////////////////////////////////////
 async function loadCheckoutPanel() {
     
     
@@ -3281,13 +3281,20 @@ async function loadCheckoutPanel() {
                         ]
                     },
                     callback: function(response) {
-                        // SENDING TO DB: Using 'finalSubtotal' and 'finalDeliveryFee' calculated above
-                        handleSuccessfulPayment(response.reference, finalEmail, (finalSubtotal + finalDeliveryFee), addressVal, grandTotal);
+                        // DO NOT process the order here
+                        // Just show a "verifying" message and wait for webhook
+                        showSuccessMessage('Payment Received', 'Verifying your order...');
+                        
+                        // Poll the database to see when webhook completes (optional backup)
+                        pollForOrderCompletion(response.reference);
                     },
                     onClose: () => {
                         payBtn.innerText = "Pay Now";
                         payBtn.disabled = false;
                         showStatus("Transaction cancelled.", false);
+
+                        showSuccessMessage('Processing', 'Your payment is being verified...');
+                        pollForOrderCompletion(response.reference);
                     }
                 });
 
@@ -3305,6 +3312,37 @@ async function loadCheckoutPanel() {
     if(typeof openPanel === 'function') openPanel();
 }
 
+let lastReference = '';
+
+async function pollForOrderCompletion(reference) {
+    lastReference = reference;
+    let attempts = 0;
+    const maxAttempts = 30; // Check for 30 seconds
+    
+    const pollInterval = setInterval(async () => {
+        attempts++;
+        
+        try {
+            const response = await fetch(`api/check_order_status.php?ref=${reference}`);
+            const result = await response.json();
+            
+            if (result.status === 'paid') {
+                clearInterval(pollInterval);
+                // Order was created by webhook
+                clearCart();
+                updateCartBadge();
+                setTimeout(() => loadProfilePanel(), 1000);
+            }
+        } catch (err) {
+            console.error("Poll error:", err);
+        }
+        
+        // Stop polling after max attempts
+        if (attempts >= maxAttempts) {
+            clearInterval(pollInterval);
+        }
+    }, 1000); // Check every 1 second
+}
 // Add this helper to your JS
 async function pollOrderStatus(reference) {
     // Try to see if the order exists in the DB every 3 seconds
