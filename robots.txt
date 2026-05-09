@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /admin/
+Disallow: /includes/
+Disallow: /vendor/
+Disallow: .env
+
+Sitemap: https://mamagstore.com/sitemap.xml
