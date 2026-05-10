@@ -787,7 +787,7 @@ window.updateGlobalUser = function(userData) {
     window.isLoggedIn = !!(userData && userData.email);
     localStorage.setItem('mamag_users', JSON.stringify(userData));
 };
-
+window._isPollingPayment = false;
 
 
 // Icons
@@ -2830,21 +2830,130 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // L///////////////////////////////////////////////////OAD CHECKOUT PANEL ////////////////////////////////////////////////////////////////////////
+let lastReference = '';
+
+async function pollForOrderCompletion(reference) {
+    window._isPollingPayment = true;
+    lastReference = reference;
+    let attempts = 0;
+    const maxAttempts = 60; // Check for 60 seconds 
+    
+    console.log(`🔍 Starting poll for reference: ${reference}`);
+    
+    const pollInterval = setInterval(async () => {
+        attempts++;
+        
+        try {
+            const response = await fetch(`api/check_order_status.php?ref=${encodeURIComponent(reference)}`);
+            const result = await response.json();
+            
+            console.log(`[Attempt ${attempts}/60] Order status: ${result.status}`);
+            
+            // Check for success states (case-insensitive)
+            if (result.status && (result.status.toLowerCase() === 'paid' || result.status.toLowerCase() === 'success')) {
+                clearInterval(pollInterval);
+                const payBtn = document.getElementById('payBtn');
+                if (payBtn) { payBtn.disabled = false; }
+                console.log("✅ Order confirmed by webhook!");
+                
+                // Clear cart immediately
+                cartItems = []; 
+                window.appliedDiscount = { code: '', amount: 0, type: '', min_order: 0 };
+                localStorage.removeItem('mamag_cart');
+                updateCartBadge();
+                localStorage.removeItem('mamag_checkout_draft');
+                
+                showSuccessMessage('Order Confirmed!', 'Redirecting to your orders...');
+                
+                // Redirect after brief delay
+                setTimeout(async () => {
+                    if (window.currentUser && window.currentUser.email) {
+                        await refreshAndOpenProfile();
+                    } else {
+                        loadProfilePanel();
+                    }
+                }, 1500);
+                
+                return; // Exit the poll
+            }
+        } catch (err) {
+            console.error("❌ Poll error:", err);
+        }
+        
+        // Show waiting message at 30 seconds
+        if (attempts === 30) {
+            const statusBox = document.getElementById('checkoutStatus');
+            if (statusBox) {
+                statusBox.style.display = 'block';
+                statusBox.style.background = '#333';
+                statusBox.style.color = '#ffff4d';
+                statusBox.innerText = "⏳ Still verifying... This may take another 30 seconds";
+            }
+        }
+        
+        // Stop polling after max attempts
+        if (attempts >= maxAttempts) {
+            clearInterval(pollInterval);
+            console.log("⏱️ Polling timeout - stopping");
+            
+            const payBtn = document.getElementById('payBtn');
+            if (payBtn) {
+                payBtn.disabled = false;
+                payBtn.innerText = "Pay Now";
+            }
+            
+            const statusBox = document.getElementById('checkoutStatus');
+            if (statusBox) {
+                statusBox.style.display = 'block';
+                statusBox.style.background = '#ff4d4d1a';
+                statusBox.style.color = '#ff4d4d';
+                statusBox.innerText = "⚠️ Verification timeout. Payment may still be processing. Check your email or refresh the page.";
+            }
+
+            // On success:
+            window._isPollingPayment = false;
+            
+            // On timeout:
+            window._isPollingPayment = false;
+
+            
+            // Final attempt to check
+            console.log("📧 One final check in 5 seconds...");
+            setTimeout(async () => {
+                const finalCheck = await fetch(`api/check_order_status.php?ref=${encodeURIComponent(reference)}`);
+                const finalResult = await finalCheck.json();
+                if (finalResult.status && finalResult.status.toLowerCase() === 'paid') {
+                    showSuccessMessage('Order Found!', 'Your payment was confirmed.');
+                    setTimeout(() => loadProfilePanel(), 1000);
+                }
+            }, 5000);
+        }
+    }, 1000); // Check every 1 second
+}
+// Add this helper to your JS
+async function pollOrderStatus(reference) {
+    // Try to see if the order exists in the DB every 3 seconds
+    const check = setInterval(async () => {
+        const response = await fetch(`api/verify_reference.php?ref=${reference}`);
+        const result = await response.json();
+        
+        if (result.status === 'Paid') {
+            clearInterval(check);
+            showSuccessScreen(); // Your modern UI success message
+        }
+    }, 3000);
+    
+    // Stop trying after 2 minutes
+    setTimeout(() => clearInterval(check), 120000);
+}
+
+
 async function loadCheckoutPanel() {
     
-    
+    window._checkoutRendering = true;
     window.currentUser = window.currentUser || JSON.parse(localStorage.getItem('mamag_user_session'));
+    if (window._isPollingPayment) return;
     
-    async function validateUserSession() {
-        const savedSession = localStorage.getItem('mamag_user_session');
-        if (savedSession) {
-            // Silently restore the user object into memory
-            window.currentUser = JSON.parse(savedSession);
-            return true;
-        }
-        return false;
-    }
-
     // --- 2. THE SESSION RE-HYDRATION ---
     // Instead of just checking memory, we force a check against Storage
     if (!window.currentUser) {
@@ -2858,11 +2967,13 @@ async function loadCheckoutPanel() {
     const rawDraft = localStorage.getItem('mamag_checkout_draft');
     if (rawDraft) {
         const draft = JSON.parse(rawDraft);
-        // Only recover if the draft is less than 30 minutes old
         if (Date.now() - draft.lastSaved < 1800000) {
-            window.selectedState = draft.selectedState || window.selectedState;
-            window.selectedRegion = draft.selectedRegion || window.selectedRegion;
-            // Address and Phone will be injected into the HTML string below
+            if (!window.selectedState || window.selectedState === 'Select State') {
+                window.selectedState = draft.selectedState || 'Select State';
+            }
+            if (!window.selectedRegion || window.selectedRegion.name === 'Select Region') {
+                window.selectedRegion = draft.selectedRegion || { name: 'Select Region', price: 0 };
+            }
         }
     }
 
@@ -2935,12 +3046,6 @@ async function loadCheckoutPanel() {
         }, 0);
     };
 
-    const draft = JSON.parse(localStorage.getItem('checkout_draft'));
-    if (draft) {
-        window.selectedState = draft.selectedState;
-        window.selectedRegion = draft.selectedRegion;
-        // ... fill inputs after panel renders
-    }
 
     const subtotal = calculateTotal();
 
@@ -3170,7 +3275,11 @@ async function loadCheckoutPanel() {
                 <div id="checkoutStatus" style="display:none; text-align:center; padding:12px; border-radius:8px; margin-top:15px; font-size:16px; font-weight:500;"></div>
 
                 ${isLoggedIn ? 
-                    `<button type="submit" id="payBtn" class="panel-btn primary" style="width:100%; margin-top:20px; font-weight:bold;">Pay Now</button>` : 
+                    `<button type="submit" id="payBtn" class="panel-btn primary" 
+                    style="width:100%; margin-top:20px; font-weight:bold;"
+                    ${window._isPollingPayment ? 'disabled' : ''}>
+                    ${window._isPollingPayment ? 'Verifying payment...' : 'Pay Now'}
+                    </button>` : 
                     `<button type="button" onclick="window.pendingCheckout=true; loadAuthPanel();" class="panel-btn primary">Login to Pay</button>`}
             </form>
         </div>
@@ -3225,7 +3334,12 @@ async function loadCheckoutPanel() {
                 payBtn.disabled = true;
 
                 const isSessionValid = await validateUserSession();
-                if (!isSessionValid) return;
+                if (!isSessionValid) {
+                    payBtn.disabled = false;
+                    payBtn.innerText = "Pay Now";
+                    showStatus("Session expired. Please log in again.");
+                    return;
+                }
 
                 const finalUser = window.currentUser || JSON.parse(localStorage.getItem('mamag_users')) || {};
                 const finalEmail = finalUser.email;
@@ -3280,23 +3394,47 @@ async function loadCheckoutPanel() {
                             { display_name: "Coupon Used", variable_name: "coupon_code", value: window.appliedDiscount.code || "None" }
                         ]
                     },
-                    callback: function(response) {
-                        // DO NOT process the order here
-                        // Just show a "verifying" message and wait for webhook
-                        showSuccessMessage('Payment Received', 'Verifying your order...');
-                        
-                        // Poll the database to see when webhook completes (optional backup)
-                        pollForOrderCompletion(response.reference);
-                    },
-                    onClose: () => {
-                        payBtn.innerText = "Pay Now";
-                        payBtn.disabled = false;
-                        showStatus("Transaction cancelled.", false);
-
-                        showSuccessMessage('Processing', 'Your payment is being verified...');
-                        pollForOrderCompletion(response.reference);
-                    }
-                });
+                    // ✅ THIS IS THE KEY CHANGE
+            callback: function(response) {
+                console.log("💳 Payment callback received:", response.reference);
+                
+                const payBtn = document.getElementById('payBtn');
+                if (payBtn) {
+                    payBtn.innerText = "Verifying payment...";
+                    payBtn.disabled = true;
+                }
+                
+                const statusBox = document.getElementById('checkoutStatus');
+                if (statusBox) {
+                    statusBox.style.display = 'block';
+                    statusBox.style.background = '#333';
+                    statusBox.style.color = '#fff';
+                    statusBox.innerText = "✓ Payment received. Verifying with Paystack...";
+                }
+                
+                // Don't process order here - let webhook handle it
+                // Just start polling
+                pollForOrderCompletion(response.reference);
+            },
+            
+            onClose: function() {
+                const payBtn = document.getElementById('payBtn');
+                if (payBtn) {
+                    payBtn.disabled = false;
+                    payBtn.innerText = "Pay Now";
+                }
+                
+                const statusBox = document.getElementById('checkoutStatus');
+                if (statusBox) {
+                    statusBox.style.display = 'block';
+                    statusBox.style.background = '#333';
+                    statusBox.style.color = '#ffff4d';
+                    statusBox.innerText = "Payment window closed. Your bag is still saved.";
+                }
+                // Don't auto-poll on close — remove the confirm() dialog which blocks UI
+                // lastReference is already set if they got far enough
+            }
+            });
 
                 handler.openIframe();
 
@@ -3312,61 +3450,6 @@ async function loadCheckoutPanel() {
     if(typeof openPanel === 'function') openPanel();
 }
 
-let lastReference = '';
-
-async function pollForOrderCompletion(reference) {
-    lastReference = reference;
-    let attempts = 0;
-    const maxAttempts = 30; // Check for 30 seconds
-    
-    const pollInterval = setInterval(async () => {
-        attempts++;
-        
-        try {
-            const response = await fetch(`api/check_order_status.php?ref=${reference}`);
-            const result = await response.json();
-            
-            if (result.status === 'paid') {
-                clearInterval(pollInterval);
-                // Order was created by webhook
-                clearCart();
-                updateCartBadge();
-                setTimeout(() => loadProfilePanel(), 1000);
-            }
-        } catch (err) {
-            console.error("Poll error:", err);
-        }
-        
-        // Stop polling after max attempts
-        if (attempts >= maxAttempts) {
-            clearInterval(pollInterval);
-        }
-    }, 1000); // Check every 1 second
-}
-// Add this helper to your JS
-async function pollOrderStatus(reference) {
-    // Try to see if the order exists in the DB every 3 seconds
-    const check = setInterval(async () => {
-        const response = await fetch(`api/verify_reference.php?ref=${reference}`);
-        const result = await response.json();
-        
-        if (result.status === 'Paid') {
-            clearInterval(check);
-            showSuccessScreen(); // Your modern UI success message
-        }
-    }, 3000);
-    
-    // Stop trying after 2 minutes
-    setTimeout(() => clearInterval(check), 120000);
-}
-
-// Update your Paystack onClose
-onClose: () => {
-    payBtn.innerText = "Pay Now";
-    payBtn.disabled = false;
-    // Even if they close the modal, check if the payment actually hit the webhook
-    pollOrderStatus(currentReference);
-}
 
 
 async function initiatePayment() {
@@ -3491,57 +3574,6 @@ async function saveOrderToDB(ref, email, amount, address, fullGrandTotal, coupon
 // Run check when the page is loaded
 document.addEventListener('DOMContentLoaded', validateUserSession);
 
-
-
-
-
-window.pickStateValue = (state, e) => {
-    e.stopPropagation();
-    
-    window.selectedState = state;
-    
-    // Reset the region selection since the state changed
-    window.selectedRegion = { name: 'Select Region', price: 0 };
-    
-    // PULL THE REGIONS: Grab the array assigned to this specific state key
-    window.deliveryRegions = window.stateData[state] || [];
-    
-    window.isStateDropdownOpen = false;
-    
-    // Re-render the panel to show the updated regions
-    loadCheckoutPanel(); 
-};
-
-window.pickRegionValue = (regionName, regionPrice, e) => {
-    e.stopPropagation();
-    
-    // Set the selected region and price
-    window.selectedRegion = { name: regionName, price: regionPrice };
-    
-    // Close the region dropdown
-    window.isDropdownOpen = false;
-    
-    // Refresh to update the Grand Total with the delivery fee
-    loadCheckoutPanel();
-};
-
-window.toggleStateList = (e) => {
-    e.stopPropagation();
-    window.isStateDropdownOpen = !window.isStateDropdownOpen;
-    window.isDropdownOpen = false; // Close region dropdown
-    loadCheckoutPanel();
-};
-
-window.toggleRegionList = (e) => {
-    e.stopPropagation();
-    if (window.selectedState === 'Select State') {
-        showStatus?.("Please select a state first", true);
-        return;
-    }
-    window.isDropdownOpen = !window.isDropdownOpen;
-    window.isStateDropdownOpen = false; // Close state dropdown
-    loadCheckoutPanel();
-};
 
 async function fetchCheckoutDeliveryRates() {
     try {
